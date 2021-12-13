@@ -1,6 +1,32 @@
 <template>
   <div class="hello">
-    <button v-on:click="destroyDB">Destroy Database</button>
+    <ul>
+      <li>
+        <button v-on:click="createDB">createDatabase</button>
+      </li>
+      <li>
+        <button v-on:click="destroyDB">Destroy Database</button>
+      </li>
+      <li>
+        <button v-on:click="syncDB">Sync Database</button>
+      </li>
+      <li>
+        <button v-on:click="createAuthor">create Author and Channel</button>
+      </li>
+      <li>
+        <button v-on:click="createSubscriber">create Subscriber and subscribe to channel</button>
+      </li>
+      <li>
+        <button v-on:click="acceptSubscription">Author accept subscription</button>
+      </li>
+      <li>
+        <button v-on:click="subscriberSendMsg">Subscriber send message</button>
+      </li>
+      <li>
+        <button v-on:click="authorFetchMsgs">Author fetch messages</button>
+      </li>
+    </ul>
+    <br>
   </div>
 </template>
 
@@ -33,69 +59,86 @@ export default {
   },
   data() {
     return {
-      db: undefined
+      db: undefined,
+      remoteCouch: undefined,
+      node: "https://chrysalis-nodes.iota.org/",
+      options: undefined,
+      author: undefined,
+      sub: undefined
     }
   },
   mounted() {
-    this.createDB();
-    this.createStream();
+    // this.createDB();
   },
   methods: {
-    async createStream() {
+    async createAuthor() {
+      // initialize streams
       await init();
-      let node = "https://chrysalis-nodes.iota.org/"
       // create sendOptions
-      let options = new SendOptions(node, true);
+      this.options = new SendOptions(this.node, true);
       // create Author
-      let author = new Author(this.createSeed(), options.clone(), ChannelType.MultiBranch);
+      this.author = new Author(this.createSeed(), this.options.clone(), ChannelType.MultiBranch);
       // announce the channel
-      let response = await author.clone().send_announce();
+      let response = await this.author.clone().send_announce();
       // get the announcement link
       let ann_link = response.get_link();
       // add channel to db
-      this.addChannel('bsrhoad', author.channel_address(), ann_link.to_string());
-
+      this.addChannel('bsrhoad', this.author.channel_address(), ann_link.to_string());
+    },
+    async createSubscriber() {
       // create a Subscriber
-      let sub = new  Subscriber(this.createSeed(), options.clone());
+      this.sub = new  Subscriber(this.createSeed(), this.options.clone());
       // get the announcement link of the channel from the db
       let channel = await this.getChannel('bsrhoad');
       let channel_ann_link = channel.docs[0].link;
       // register the channel with the subscriber
-      await sub.clone().receive_announcement(Address.from_string(channel_ann_link));
-      console.log("Subscriber successfully registered channel? ", sub.is_registered());
+      await this.sub.clone().receive_announcement(Address.from_string(channel_ann_link));
+      console.log("Subscriber successfully registered channel? ", this.sub.is_registered());
 
       // Subscriber send subscription message
-      let sub_response = await sub.clone().send_subscribe(Address.from_string(channel_ann_link));
+      let sub_response = await this.sub.clone().send_subscribe(Address.from_string(channel_ann_link));
       console.log(sub_response);
       let sub_link = sub_response.get_link();
       // add subscription to the db
       this.addSubscription('bsrhoad_sub', channel_ann_link, sub_link.to_string());
-
+    },
+    async acceptSubscription() {
+      // get the channel
+      let channel = await this.getChannel('bsrhoad');
+      let ann_link = channel.docs[0].link;
       // Author accepts & processes subsription
-      let subscription = await this.getSubscription(ann_link.to_string())
+      let subscription = await this.getSubscription(ann_link)
       let auth_sub_link = subscription.docs[0].subscription_link; 
-      await author.clone().receive_subscribe(Address.from_string(auth_sub_link));
+      await this.author.clone().receive_subscribe(Address.from_string(auth_sub_link));
 
       // Send Keyload message
-      let keyload_resp = await author.clone().send_keyload_for_everyone(ann_link);
+      let keyload_resp = await this.author.clone().send_keyload_for_everyone(Address.from_string(ann_link));
       let keyloadLink = keyload_resp.get_link();
       console.info("Keyload Link: ", keyloadLink.to_string());
-
-      // Send Message
-      await sub.clone().sync_state();
+    },
+    async subscriberSendMsg() {
+      // get the channel
+      let channel = await this.getChannel('bsrhoad');
+      let ann_link = channel.docs[0].link;
+      // get the subscription
+      let subscription = await this.getSubscription(ann_link)
+      let sub_link = subscription.docs[0].subscription_link;
+      // sync state
+      await this.sub.clone().sync_state();
       let masked_payload = this.to_bytes("Masked Payload")
       let public_payload = this.to_bytes("Public Payload")
-
-      let send_resp = await sub.clone().send_signed_packet(
-          sub_link,
+      // send message
+      let send_resp = await this.sub.clone().send_signed_packet(
+          Address.from_string(sub_link),
           public_payload,
           masked_payload
       );
       let msg_link = send_resp.get_link();
       console.log("New message sent by Sub at: ", msg_link.to_string());
-
-      // Fetch message
-      let next_msgs = await author.clone().fetch_next_msgs();
+    },
+    async authorFetchMsgs() {
+      // Fetch messages
+      let next_msgs = await this.author.clone().fetch_next_msgs();
       for (let i = 0; i < next_msgs.length; i++) {
         console.info( "Found message number ", i+1);
         console.info(
@@ -105,7 +148,6 @@ export default {
           this.from_bytes(next_msgs[i].get_message().get_masked_payload())
         );
       }
-      
     },
     createSeed() {
       return sha256('afaijg v0ajhg gfi0ha giaqhg' + Math.random()).toString(enc);
@@ -113,6 +155,7 @@ export default {
     createDB() {
       PouchDB.plugin(PouchDBFind)
       this.db = new PouchDB('mydb');
+      this.remoteCouch = 'http://admin:password@localhost:5984/mydb';
       this.db.createIndex({
         index: {fields: ['owner']}
       }).then((result) => {
@@ -134,6 +177,11 @@ export default {
       }).catch((err) => {
         console.log(err);
       })
+    },
+    syncDB() {
+      let opts = {live: true};
+      this.db.replicate.to(this.remoteCouch, opts);
+      this.db.replicate.from(this.remoteCouch, opts);
     },
     addChannel(owner, address, link) {
       let channel = {
@@ -204,7 +252,8 @@ ul {
 }
 li {
   display: inline-block;
-  margin: 0 10px;
+  margin: 10px 10px;
+  padding: auto;
 }
 a {
   color: #42b983;
